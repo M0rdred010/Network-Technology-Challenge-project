@@ -1,4 +1,3 @@
-
 import config as cf
 from config import action, LogColor
 from config import csv_dir, rules_dir
@@ -46,7 +45,7 @@ def ReadRules(json_path):
 
 def GetAllFiles(relative_path):
     """
-    返回指定文件夹下的所有csv和json文件的绝对路径
+    返回指定文件夹下的所有csv和json文件的绝对路径，按文件名中最后一个下划线后的数字排序
 
     :param relative_path: 文件夹的相对路径
     """
@@ -63,22 +62,31 @@ def GetAllFiles(relative_path):
         LogColor.error(f"路径 {absolute_path} 不是一个文件夹")
         return
     
-    files = []
+    resp = []
     # 遍历文件夹中的文件
     for root, dirs, files in os.walk(absolute_path):
         for file in files:
             if file.endswith('.csv') or file.endswith('.json'):
-                files.append(os.path.join(root, file))
+                resp.append(os.path.join(root, file))
             else:
                 LogColor.warning(f"文件 {file} 不是csv或json文件，已跳过")
 
-    return files
+    # 按文件名中最后一个下划线后的数字排序
+    def extract_number(file_path):
+        file_name : str = os.path.basename(file_path)
+        parts = file_name.rsplit('_', 1)
+        if len(parts) > 1 and parts[1].split('.')[0].isdigit():
+            return int(parts[1].split('.')[0])
+        return float('inf')  # 如果没有数字，则放在最后
+
+    resp.sort(key=extract_number)
+    return resp
 
 def run():
     engine = Engine()
     timer = 0
     for csv_file, rules_file in zip(GetAllFiles(csv_dir), GetAllFiles(rules_dir)):
-        LogColor.info(f"csv file: {csv_file}, rules file: {rules_file}")
+        LogColor.info(f"csv file: {csv_file}\n, rules file: {rules_file}\n")
         links = ReadLinks(csv_file)
         meta, rules = ReadRules(rules_file)
         engine.AddContent('UAV_01', 'test.jpg', filesize=50)
@@ -94,12 +102,12 @@ def run():
                 LogColor.info(f'time : {timer}')
                 while edge_ind < len(links) and int(links[edge_ind]['time_ms']) <= timer:
                     engine.addLink(links[edge_ind])
-                    LogColor.info(f'edge {edge_ind} applied')
+                    LogColor.debug(f'edge {edge_ind} applied')
                     edge_ind += 1
 
                 while rule_ind < len(rules) and rules[rule_ind]['time_ms'] <= timer:
                     engine.UpdateRule(rules[rule_ind], meta)
-                    LogColor.info(f'rule {rule_ind} applied')
+                    LogColor.debug(f'rule {rule_ind} applied')
                     rule_ind += 1
                 while req_ind < len(reqs) and reqs[req_ind]['time']  <= timer:
                     req = reqs[req_ind]
