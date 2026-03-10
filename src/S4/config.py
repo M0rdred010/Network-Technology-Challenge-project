@@ -1,5 +1,8 @@
-MODE = "hard" # 模式选择，“soft”为mode b，其他是mode a
-import logging
+MODE = "soft" # 模式选择，“soft”为mode b，其他是mode a, mode a为开发半成品，不推荐使用
+
+csv_dir = "../S3/output/links" # csv文件夹路径，存储网络拓扑信息
+rules_dir = "../S3/output/rules" # json文件夹路径，存储路由规则
+
 from enum import Enum
 class action(Enum):
     NOP = 1
@@ -7,6 +10,8 @@ class action(Enum):
     DEL = 3
     REPLACE = 4
 
+
+import logging
 class LogColor:
     """
     根据不同的日志级别，打印不颜色的日志
