@@ -30,13 +30,13 @@ IP_PREFIX = "10.0.3."  # 卫星IP前缀
 CODE_FILE_PATH = os.path.abspath(__file__)
 # 获取代码文件所在的目录（路径基准）
 CODE_DIR = os.path.dirname(CODE_FILE_PATH)
+PARENT_DIR = os.path.dirname(CODE_DIR)
 CELESTRAK_STARLINK_TLE_URL = "https://celestrak.org/NORAD/elements/gp.php?GROUP=starlink&FORMAT=tle" # 星链TLE数据源
 TLE_FILE = os.path.join(CODE_DIR, "starlink.tle") # 本地TLE文件路径
 OUTPUT_DIR = os.path.join(
-    CODE_DIR,
-    "StarCDN_Project",
-    "data",
-    "traces"
+    PARENT_DIR,
+    "S3",
+    "sat_trace"
 )  # 输出目录
 CHUNK_DURATION_SEC = 60  # 每个文件的时间切片（60秒）
 
