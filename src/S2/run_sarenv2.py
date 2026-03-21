@@ -1,229 +1,169 @@
 import os
 import csv
 import math
-from datetime import datetime
-import numpy as np
-from pymap3d import enu2ecef
+import random
+from pymap3d import enu2ecef  # 用于将站心坐标系(ENU)转换为地心轴坐标系(ECEF)
 
 import sarenv
-from sarenv.analytics.paths import generate_spiral_path
-from sarenv import LostPersonLocationGenerator
+from sarenv.analytics.paths import generate_spiral_path  # 专门用于搜救场景的螺旋路径生成函数
 
-# 1. 配置参数
-dataset_dir = "sarenv_dataset"
-num_uavs = 3
-search_radius_m = 500
-altitude_m = 50
-fov_deg = 60
-overlap = 0.2
-path_point_spacing_m = 10
-uav_speed_mps = 15
-detection_range_m = 30  # 相机检测范围（米）
+# -------------------------
+# 1. 地理与仿真配置 (Geographic & Simulation Config)
+# -------------------------
+ANCHOR_LAT = 30  
+ANCHOR_LON = 104 
+ANCHOR_ALT = 459
 
-ANCHOR_LAT = 30.0
-ANCHOR_LON = 104.0
-ANCHOR_ALT = 500.0
+NUM_UAVS = 3               # 无人机数量
+SEARCH_RADIUS_M = 2500     # 搜索覆盖半径 2.5km
+ALTITUDE_M = 50            # 飞行相对高度 50m
+DETECTION_RANGE_M = 60     # 无人机传感器检测半径
+UAV_SPEED_MPS = 15         # 15m/s 恒定巡航速度
 
-GS_ECEF_X, GS_ECEF_Y, GS_ECEF_Z = enu2ecef(0, 0, 0, ANCHOR_LAT, ANCHOR_LON, ANCHOR_ALT, deg=True)
+TIME_STEP_MS = 100         # 100ms 采样周期 (10Hz)
+TOTAL_DURATION_MS = 600000 # 10 分钟模拟时长 (10 * 60 * 1000)
 
-CHUNK_DURATION_MS = 60000  # 60秒
-TIME_STEP_MS = 100  # 10Hz
-TOTAL_DURATION_MS = 420000  # 总时长7分钟
+# -------------------------
+# 2. 受害者生成逻辑 (Victim Generation)
+# -------------------------
+def generate_victims_in_sichuan(num, radius):
+    victims = []
+    for i in range(num):
+        r = radius * math.sqrt(random.random())
+        theta = random.uniform(0, 2 * math.pi)
+        vx = r * math.cos(theta)
+        vy = r * math.sin(theta)
+        victims.append((vx, vy))
+    return victims
 
-# ==================== 新增：生成失联人员位置 ====================
-print("[S2] 加载环境并生成失联人员位置...")
-loader = sarenv.DatasetLoader(dataset_dir)
-env_item = loader.load_environment("large")
+print(f"[S1] 坐标锚点已设为：({ANCHOR_LAT}, {ANCHOR_LON}, {ANCHOR_ALT}m)")
+victims_enu = generate_victims_in_sichuan(50, SEARCH_RADIUS_M)
+print(f"[S1] 已布设 {len(victims_enu)} 个受害者。")
 
-# 生成20个失联人员位置（基于真实行为模型）
-# 修改：参数名从 num_locations 改为 n，random_ratio 改为 percent_random_samples
-victim_generator = LostPersonLocationGenerator(env_item)
-victims = victim_generator.generate_locations(n=20, percent_random_samples=0)
-
-# 转换为ENU坐标（相对于anchor）
-victims_enu = [(v.x, v.y) for v in victims]
-print(f"[S2] 已生成 {len(victims_enu)} 个失联人员位置")
-
-# 2. 生成无人机路径
+# -------------------------
+# 3. 路径规划 (Path Planning)
+# -------------------------
+print("[S2] 规划协同螺旋路径...")
 spiral_paths = generate_spiral_path(
     center_x=0, center_y=0,
-    max_radius=search_radius_m,
-    fov_deg=fov_deg,
-    altitude=altitude_m,
-    overlap=overlap,
-    num_drones=num_uavs,
-    path_point_spacing_m=path_point_spacing_m,
+    max_radius=SEARCH_RADIUS_M,
+    fov_deg=60, altitude=ALTITUDE_M,
+    overlap=0.3, num_drones=NUM_UAVS,
+    path_point_spacing_m=30, 
 )
 
 # -------------------------
-# 3. 预计算轨迹（带时间戳 + 检测逻辑）
+# 4. 平滑插值与检测逻辑 (Interpolation & Detection)
 # -------------------------
-def interpolate_path_to_10hz(path, speed_mps, victims_enu, detection_range):
-    """
-    插值路径到10Hz，并加入失联人员检测逻辑
-    返回: {time_ms: (x, y, heading, role, detected_victim_ids)}
-    """
+def process_uav_mission(path, victims_list):
     coords = list(path.coords)
-    trajectory = {}
-    time_ms = 0
-    detected_victims = set()  # 已发现的受害者ID
-    cache_until_ms = -1  # CACHE模式持续到什么时候
+    traj_data = {}        
+    current_time_ms = 0.0
+    detected_ids = set()  
+    cache_until_ms = -1.0 
     
     for i in range(len(coords) - 1):
-        x1, y1 = coords[i]
-        x2, y2 = coords[i + 1]
-        dist = math.hypot(x2 - x1, y2 - y1)
-        duration_ms = int((dist / speed_mps) * 1000)
-        steps = max(1, duration_ms // TIME_STEP_MS)
+        p1, p2 = coords[i], coords[i+1]
+        dist = math.hypot(p2[0]-p1[0], p2[1]-p1[1])
+        seg_ms = (dist / UAV_SPEED_MPS) * 1000  
         
-        dx = x2 - x1
-        dy = y2 - y1
-        heading = math.degrees(math.atan2(dx, dy)) % 360
+        start_ms = current_time_ms
+        end_ms = current_time_ms + seg_ms
+        t_sample = math.ceil(start_ms / TIME_STEP_MS) * TIME_STEP_MS
         
-        for step in range(steps):
-            t = time_ms + step * TIME_STEP_MS
-            ratio = step / steps
-            x = x1 + (x2 - x1) * ratio
-            y = y1 + (y2 - y1) * ratio
+        while t_sample <= end_ms and t_sample <= TOTAL_DURATION_MS:
+            ratio = (t_sample - start_ms) / seg_ms if seg_ms > 0 else 0
+            curr_x = p1[0] + (p2[0] - p1[0]) * ratio
+            curr_y = p1[1] + (p2[1] - p1[1]) * ratio
+            angle = math.degrees(math.atan2(p2[0]-p1[0], p2[1]-p1[1])) % 360
             
-            # ==================== 检测逻辑 ====================
-            newly_detected = []
+            for vid, (vx, vy) in enumerate(victims_list):
+                if vid not in detected_ids:
+                    if math.hypot(curr_x - vx, curr_y - vy) < DETECTION_RANGE_M:
+                        detected_ids.add(vid)
+                        cache_until_ms = max(cache_until_ms, t_sample + 10000)
+                        print(f"  [t={int(t_sample)}ms] UAV 发现目标 #{vid}！")
             
-            # 检查是否发现新的受害者
-            for vid, (vx, vy) in enumerate(victims_enu):
-                if vid in detected_victims:
-                    continue
-                d = math.hypot(x - vx, y - vy)
-                if d < detection_range:
-                    detected_victims.add(vid)
-                    newly_detected.append(vid)
-                    # 发现后进入CACHE模式10秒（悬停传输）
-                    cache_until_ms = max(cache_until_ms, t + 10000)
-                    print(f"  [t={t}ms] 发现受害者 #{vid}！位置({vx:.1f}, {vy:.1f})，距离{d:.1f}m")
+            role = "CACHE" if t_sample < cache_until_ms else "RELAY"
+            traj_data[int(t_sample)] = (curr_x, curr_y, angle, role)
+            t_sample += TIME_STEP_MS
             
-            # 确定当前角色
-            if t < cache_until_ms:
-                role = "CACHE"  # 悬停传输模式
-            else:
-                role = "RELAY"  # 正常搜索模式
-            
-            trajectory[t] = (x, y, heading, role, list(detected_victims))
-        
-        time_ms += duration_ms
+        current_time_ms = end_ms
+        if current_time_ms > TOTAL_DURATION_MS: break
     
-    # 记录最后状态
-    last_pos = coords[-1] if coords else (0, 0)
-    trajectory['last_time'] = time_ms
-    trajectory['last_pos'] = (last_pos[0], last_pos[1], heading)
-    trajectory['final_detected'] = list(detected_victims)
+    # 悬停补全
+    last_pos = (coords[-1][0], coords[-1][1], 0, "RELAY")
+    for t in range(0, TOTAL_DURATION_MS + TIME_STEP_MS, TIME_STEP_MS):
+        if t not in traj_data:
+            traj_data[t] = traj_data.get(t - TIME_STEP_MS, last_pos)
+            
+    return traj_data, len(detected_ids)
+
+print("[S3] 计算平滑飞行轨迹...")
+uav_results = [process_uav_mission(p, victims_enu) for p in spiral_paths]
+
+# -------------------------
+# 5. 生成切片 CSV 文件 (Export Data)
+# -------------------------
+
+# 【修改点】获取当前脚本的绝对路径，并向上退两级定位到根目录，然后再进入 S3/uav_trace
+current_dir = os.path.dirname(os.path.abspath(__file__))
+OUTPUT_DIR = os.path.abspath(os.path.join(current_dir, "..", "..", "S3", "uav_trace"))
+
+# 确保目标文件夹存在
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+GS_ECEF = enu2ecef(0, 0, 0, ANCHOR_LAT, ANCHOR_LON, ANCHOR_ALT, deg=True)
+
+# 定义切片时长为 60 秒 (60,000 ms)
+CHUNK_DURATION_MS = 60000  
+
+print(f"[S4] 正在导出切片 CSV 至: {OUTPUT_DIR}")
+
+fieldnames = ["time_ms", "node_id", "role", "type", "ecef_x", "ecef_y", "ecef_z", "ip", "heading_deg", "battery_pct"]
+
+# 按照 60 秒进行循环切片
+for chunk_start in range(0, TOTAL_DURATION_MS, CHUNK_DURATION_MS):
+    # 计算当前切片的结束时间，例如 0 ~ 59999
+    chunk_end = min(chunk_start + CHUNK_DURATION_MS - 1, TOTAL_DURATION_MS - 1)
     
-    return trajectory
-
-# 为每架无人机生成轨迹
-print("[S2] 生成无人机轨迹（带检测）...")
-uav_trajectories = [
-    interpolate_path_to_10hz(p, uav_speed_mps, victims_enu, detection_range_m) 
-    for p in spiral_paths
-]
-
-# 打印统计
-for i, traj in enumerate(uav_trajectories):
-    final_detected = traj.get('final_detected', [])
-    print(f"  UAV_{i+1}: 共发现 {len(final_detected)} 个目标")
-
-# 4. 按固定时间循环生成数据
-uav_ips = [f"10.0.0.{2+i}" for i in range(num_uavs)]
-gs_ip = "10.0.0.1"
-
-INIT_BATTERY = 100.0
-BATTERY_DRAIN_PER_SEC = 0.1
-
-def get_uav_state_at_time(traj, time_ms):
-    """获取指定时间的UAV状态"""
-    if time_ms in traj:
-        x, y, heading, role, _ = traj[time_ms]
-        return x, y, heading, role
-    elif time_ms > traj['last_time']:
-        # 已到达终点，保持最后位置悬停（CACHE模式）
-        x, y, heading = traj['last_pos']
-        return x, y, heading, "CACHE"
-    else:
-        # 时间点在步进之间，找前一个已知点
-        known_times = [t for t in traj.keys() if isinstance(t, int) and t <= time_ms]
-        if known_times:
-            closest_time = max(known_times)
-            x, y, heading, role, _ = traj[closest_time]
-            return x, y, heading, role
-        else:
-            x, y, heading = traj['last_pos']
-            return x, y, heading, "RELAY"
-
-def write_chunk(data, start_ms):
-    """写入切片文件"""
-    end_ms = start_ms + CHUNK_DURATION_MS
-    filename = f"uav_trace_{start_ms}_{end_ms}.csv"
-    fieldnames = ["time_ms", "node_id", "role", "type", "ecef_x", "ecef_y", "ecef_z", 
-                  "ip", "heading_deg", "battery_pct"]
-    
-    # 确保目录存在
-    os.makedirs("traces", exist_ok=True)
-    filepath = os.path.join("traces", filename)
+    filename = f"uav_trace_{chunk_start}_{chunk_end}.csv"
+    filepath = os.path.join(OUTPUT_DIR, filename)
     
     with open(filepath, "w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(data)
-    print(f"[SUCCESS] {filepath} ({len(data)}行)")
-
-# 按时间切片生成
-current_chunk = []
-chunk_start_ms = 0
-
-for time_ms in range(0, TOTAL_DURATION_MS, TIME_STEP_MS):
-    # 检查是否需要切分
-    if time_ms >= chunk_start_ms + CHUNK_DURATION_MS:
-        write_chunk(current_chunk, chunk_start_ms)
-        current_chunk = []
-        chunk_start_ms = time_ms
-    
-    # GS数据（每帧都生成）
-    current_chunk.append({
-        "time_ms": time_ms,
-        "node_id": "GS_01",
-        "role": "CLIENT",
-        "type": "GS",
-        "ecef_x": round(GS_ECEF_X, 1),
-        "ecef_y": round(GS_ECEF_Y, 1),
-        "ecef_z": round(GS_ECEF_Z, 1),
-        "ip": gs_ip,
-        "heading_deg": -1.0,
-        "battery_pct": -1
-    })
-    
-    # UAV数据
-    for agent_id in range(num_uavs):
-        x, y, heading, role = get_uav_state_at_time(uav_trajectories[agent_id], time_ms)
         
-        ecef_x, ecef_y, ecef_z = enu2ecef(x, y, altitude_m, ANCHOR_LAT, ANCHOR_LON, ANCHOR_ALT, deg=True)
-        
-        elapsed_sec = time_ms / 1000
-        battery_pct = max(0, int(INIT_BATTERY - elapsed_sec * BATTERY_DRAIN_PER_SEC))
-        
-        current_chunk.append({
-            "time_ms": time_ms,
-            "node_id": f"UAV_{agent_id+1:02d}",
-            "role": role,
-            "type": "UAV",
-            "ecef_x": round(ecef_x, 1),
-            "ecef_y": round(ecef_y, 1),
-            "ecef_z": round(ecef_z, 1),
-            "ip": uav_ips[agent_id],
-            "heading_deg": round(heading, 1),
-            "battery_pct": battery_pct
-        })
+        # 遍历当前 60 秒切片内的时间戳
+        for t in range(chunk_start, chunk_start + CHUNK_DURATION_MS, TIME_STEP_MS):
+            if t >= TOTAL_DURATION_MS:
+                break
+                
+            # 1. 地面站
+            writer.writerow({
+                "time_ms": t, "node_id": "GS_01", "role": "CLIENT", "type": "GS",
+                "ecef_x": round(GS_ECEF[0], 1), "ecef_y": round(GS_ECEF[1], 1), "ecef_z": round(GS_ECEF[2], 1),
+                "ip": "10.0.0.1", "heading_deg": -1.0, "battery_pct": -1
+            })
+            
+            # 2. 三架无人机
+            for i in range(NUM_UAVS):
+                traj, _ = uav_results[i]
+                
+                # 获取位置信息
+                ux, uy, uh, urole = traj[t]
+                ex, ey, ez = enu2ecef(ux, uy, ALTITUDE_M, ANCHOR_LAT, ANCHOR_LON, ANCHOR_ALT, deg=True)
+                batt = round(max(0.0, 100 - (t / 1000 * 0.1)), 1)
+                
+                writer.writerow({
+                    "time_ms": t, "node_id": f"UAV_{i+1:02d}", "role": urole, "type": "UAV",
+                    "ecef_x": round(ex, 1), "ecef_y": round(ey, 1), "ecef_z": round(ez, 1),
+                    "ip": f"10.0.0.{2+i}", "heading_deg": round(uh, 1), "battery_pct": batt
+                })
 
-# 写入最后一个切片
-if current_chunk:
-    write_chunk(current_chunk, chunk_start_ms)
+print("\n" + "="*30)
+for i, (_, count) in enumerate(uav_results):
+    print(f"UAV_{i+1} 搜救总结: 成功发现 {count} 名失联人员")
+print("="*30)
+print(f"[DONE] 仿真结束。切片文件已存入: {OUTPUT_DIR}")
 
-print(f"[DONE] 仿真时长：{TOTAL_DURATION_MS}ms")
