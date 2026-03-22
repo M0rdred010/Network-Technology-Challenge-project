@@ -7,6 +7,8 @@ import { update2DTopology } from './lib/topo2d.js';
 Cesium.Ion.defaultAccessToken = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJqdGkiOiJlNjdhNjdjZC1mMjA0LTQwMWEtYTcwYi02MTA5YWY5ZTZhYzEiLCJpZCI6Mzg4MDQ1LCJpYXQiOjE3NzA0Mzc0MTR9.Dfqi_zBqKJV_Yia-9waxWRMQ5VkYP4IAkQin7t5vVao';
 
 const viewer = new Cesium.Viewer('app', {
+    timeline: false,
+    // animation: false,
     terrainProvider: null,
     baseLayerPicker: false, shouldAnimate: true,
     selectionIndicator: false, infoBox: false, navigationHelpButton: false,
