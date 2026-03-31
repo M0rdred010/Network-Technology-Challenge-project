@@ -1,18 +1,21 @@
 import subprocess
 import time
 import sys
+import matplotlib.pyplot as plt
 
-def run_and_time(script_name):
-    print(f"[{script_name}] 开始运行...")
+def run_and_time(script_name, folder_name, no_save=False):
+    print(f"[{script_name}] 开始运行 (数据目录: {folder_name})...")
     start_time = time.time()
     
     try:
         # 使用 sys.executable 确保使用当前同一个 Python 解释器
-        # 不捕获输出，让其直接打印到终端，这样你能看到实时进度
-        subprocess.run([sys.executable, script_name], check=True)
+        cmd = [sys.executable, script_name, folder_name]
+        if no_save:
+            cmd.append('--no-save')
+        subprocess.run(cmd, check=True)
         end_time = time.time()
         duration = end_time - start_time
-        print(f"[{script_name}] 运行完成！耗时: {duration:.2f} 秒\n")
+        print(f"[{script_name}] [{folder_name}] 运行完成！耗时: {duration:.2f} 秒\n")
         return duration
     except subprocess.CalledProcessError as e:
         print(f"\n[错误] 运行 {script_name} 失败，退出码: {e.returncode}")
@@ -22,32 +25,88 @@ def run_and_time(script_name):
         return None
 
 def main():
-    print("="*40)
-    print("      脚本运行速度自动化性能比对      ")
-    print("="*40)
+    print("="*60)
+    print("        自动化性能比对测试 (多规模拓扑)        ")
+    print("="*60)
     
-    print("\n提醒：如果你使用的是完整数据集，测试可能需要较长时间。")
-    print("建议可以在脚本里先配置只跑一个小块（比如 0_59900）来快速验证。\n")
+    # 定义测试的文件夹以及对应的卫星数量
+    test_cases = [
+        {"folder": "sat_trace", "sat_count": 25},
+        {"folder": "sat_trace_50", "sat_count": 50},
+        {"folder": "sat_trace_100", "sat_count": 100},
+        {"folder": "sat_trace_150", "sat_count": 150},
+        {"folder": "sat_trace_200", "sat_count": 200},
+    ]
 
-    time_original = run_and_time("s3.py")
-    time_optimized = run_and_time("s3_optimized.py")
-    
-    print("="*40)
-    print("               测试结果               ")
-    print("="*40)
-    
-    if time_original is not None and time_optimized is not None:
-        print(f"原版脚本 (s3.py) 耗时:       {time_original:.2f} 秒")
-        print(f"优化版脚本 (s3_optimized.py) 耗时: {time_optimized:.2f} 秒")
+    counts = []
+    times_original = []
+    times_optimized = []
+
+    for case in test_cases:
+        folder = case["folder"]
+        sat_count = case["sat_count"]
+        print(f"\n======== 测试规模: {sat_count} 卫星 ========")
         
-        if time_optimized > 0:
-            speedup = time_original / time_optimized
-            print(f"\n🎉 性能提升: 优化版比原版快了 {speedup:.2f} 倍！")
+        # 对于节点数目大于 25 的，不输出文件以免占用过多硬盘空间
+        skip_save = (sat_count > 25)
+        
+        # 跑原版
+        t_orig = run_and_time("s3.py", folder, skip_save)
+        # 跑优化版
+        t_opt = run_and_time("s3_optimized.py", folder, skip_save)
+        
+        counts.append(sat_count)
+        times_original.append(t_orig if t_orig else 0)
+        times_optimized.append(t_opt if t_opt else 0)
+
+    # 打印终端汇总表格
+    print("\n" + "="*60)
+    print("                      测试结果汇总                      ")
+    print("="*60)
+    print(f"{'卫星数量':<8} | {'原版耗时 (s)':<14} | {'优化版耗时 (s)':<14} | {'提升倍数':<0}")
+    print("-" * 60)
+    for c, to, tp in zip(counts, times_original, times_optimized):
+        speedup = (to / tp) if tp > 0 else 0
+        print(f"{c:<12} | {to:<18.2f} | {tp:<18.2f} | {speedup:.2f}x")
+    print("="*60)
+
+    # =================
+    # 使用 matplotlib 画图
+    # =================
+    plt.figure(figsize=(10, 6))
+    
+    # 画线
+    plt.plot(counts, times_original, marker='o', linestyle='-', color='tab:red', linewidth=2, label='Original (s3.py)')
+    plt.plot(counts, times_optimized, marker='s', linestyle='-', color='tab:green', linewidth=2, label='Optimized (s3_optimized.py)')
+    
+    # 标注数值标签
+    for i, txt in enumerate(times_original):
+        if txt > 0:
+            plt.annotate(f"{txt:.1f}s", (counts[i], times_original[i]), textcoords="offset points", xytext=(0,10), ha='center', color='tab:red')
             
-            time_saved = time_original - time_optimized
-            print(f"节省了 {time_saved:.2f} 秒的时间。")
-    else:
-        print("由于某个脚本未成功运行完毕，无法计算速度差异。")
+    for i, txt in enumerate(times_optimized):
+        if txt > 0:
+            plt.annotate(f"{txt:.1f}s", (counts[i], times_optimized[i]), textcoords="offset points", xytext=(0,-15), ha='center', color='tab:green')
+    
+    # 图表装饰
+    plt.title('Algorithm Performance Comparison: Original vs Optimized', fontsize=14, pad=15)
+    plt.xlabel('Number of Satellites (Network Scale)', fontsize=12)
+    plt.ylabel('Execution Time (Seconds)', fontsize=12)
+    plt.xticks(counts)  # 让X轴精确对应我们测试的几个数值点
+    
+    plt.grid(True, linestyle='--', alpha=0.6)
+    plt.legend(fontsize=11)
+    
+    # 保存并展示
+    plot_filename = "performance_comparison_scaling.png"
+    plt.savefig(plot_filename, dpi=300, bbox_inches='tight')
+    print(f"\n✅ 对比折线图表已成功保存为本目录下的: {plot_filename}")
+    
+    try:
+        # 打开窗口展示
+        plt.show()
+    except Exception as e:
+        print("（终端无GUI环境，已跳过弹出窗口展示）")
 
 if __name__ == "__main__":
     main()

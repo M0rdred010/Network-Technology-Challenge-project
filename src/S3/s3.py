@@ -265,27 +265,26 @@ def generate_routing_rules(active_links, time_ms, node_ip_map, active_nodes):
         # 为高优控制流构建专门的图 (强调寿命)
         G_ctrl = build_graph_for_flow(active_links, ctrl_flow['priority'])
         
-# 寻找去往 UAV 们的路径
+        # 寻找去往 UAV 们的路径（取第一个 UAV 作为代表）
         target_uavs = [n for n in active_nodes if n.startswith('UAV_')]
-        for target_uav in target_uavs:
+        if target_uavs:
+            target_uav = target_uavs[0]  # 取第一个 UAV
             try:
                 # 寻找最短路 (这里 weight 是倾向于长寿命的)
                 path = nx.shortest_path(G_ctrl, ctrl_flow['src'], target_uav, weight='weight')
                 if len(path) > 1:
-                    target_ip = node_ip_map.get(target_uav, "0.0.0.0")
-                    for i in range(len(path) - 1):
-                        nh_id = path[i+1]
-                        rules.append({
-                            "time_ms": int(time_ms),
-                            "node": path[i],
-                            "dst_cidr": f"{target_ip}/32", # 指令网段
-                            "action": "replace",
-                            "next_hop": nh_id,
-                            "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
-                            "algo": "Stability-First",
-                            "req_bw_mbps": get_current_bandwidth(ctrl_flow, time_ms), # ★ 记录当前带宽需求
-                            "debug_info": f"Ctrl command to {target_uav}"
-                        })
+                    nh_id = path[1]
+                    rules.append({
+                        "time_ms": int(time_ms),
+                        "node": ctrl_flow['src'],
+                        "dst_cidr": ctrl_flow['dst_cidr'], # 指令网段
+                        "action": "replace",
+                        "next_hop": nh_id,
+                        "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
+                        "algo": "Stability-First",
+                        "req_bw_mbps": get_current_bandwidth(ctrl_flow, time_ms), # ★ 记录当前带宽需求
+                        "debug_info": f"Ctrl command to UAVs"
+                    })
             except: pass
 
     # --- 2. 处理各无人机的视频回传流 (UAV -> GS_01) ---
@@ -296,40 +295,41 @@ def generate_routing_rules(active_links, time_ms, node_ip_map, active_nodes):
         if flow_name.startswith("VIDEO_FLOW_"):
             src_uav = flow_config['src']
             if src_uav not in active_nodes: continue
-
+            
             # 为视频流构建图 (强调延迟与平衡)
             G_video = build_graph_for_flow(active_links, flow_config['priority'])
-
+            
             try:
                 path = nx.shortest_path(G_video, src_uav, target_gs, weight='weight')
                 if len(path) > 1:
+                    nh_id = path[1]
                     current_bw = get_current_bandwidth(flow_config, time_ms)
-                    target_ip = node_ip_map.get(target_gs, "0.0.0.0")
-
-                    for i in range(len(path) - 1):
-                        nh_id = path[i+1]
-                        rules.append({
-                            "time_ms": int(time_ms),
-                            "node": path[i], # 为经过的每一个节点建立转发规则
-                            "dst_cidr": f"{target_ip}/32",
-                            "action": "replace",
-                            "next_hop": nh_id,
-                            "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
-                            "algo": "Latency-Balanced",
-                            "req_bw_mbps": current_bw, # ★ 告诉 S4 现在需要多大带宽
-                            "debug_info": f"[{current_bw} Mbps] Video streaming to {target_gs}"
-                        })
+                    
+                    rules.append({
+                        "time_ms": int(time_ms),
+                        "node": src_uav, # ★ 视频流是 UAV 主动发起的，规则下发给 UAV
+                        "dst_cidr": flow_config['dst_cidr'], 
+                        "action": "replace",
+                        "next_hop": nh_id,
+                        "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
+                        "algo": "Latency-Balanced",
+                        "req_bw_mbps": current_bw, # ★ 告诉 S4 现在需要多大带宽
+                        "debug_info": f"[{current_bw} Mbps] Video streaming to {target_gs}"
+                    })
             except: pass
 
     return rules
 def main():
-    output_link_dir = 'output/links'
-    output_rule_dir = 'output/rules'
+    import sys
+    sat_dir = sys.argv[1] if len(sys.argv) > 1 else 'sat_trace'
+
+    output_link_dir = f'output_{sat_dir}/links'
+    output_rule_dir = f'output_{sat_dir}/rules'
     os.makedirs(output_link_dir, exist_ok=True)
     os.makedirs(output_rule_dir, exist_ok=True)
 
     # 1. 加载数据 (指定单个 UAV 文件)
-    df_sat, df_uav, timelines = load_and_merge_traces(uav_file='uav_trace_full.csv')
+    df_sat, df_uav, timelines = load_and_merge_traces(sat_dir=sat_dir, uav_file='uav_trace_full.csv')
     
     if not timelines:
         print("[Error] No timelines found. Exiting.")
@@ -394,19 +394,22 @@ def main():
             link_filename = f"topology_links_{start_ms}_{end_ms}.csv"
             rule_filename = f"routing_rules_{start_ms}_{end_ms}.json"
             
-            if chunk_links:
-                df_links = pd.DataFrame(chunk_links)
-                cols = ['time_ms', 'src', 'dst', 'direction', 'distance_km', 'delay_ms', 
-                        'jitter_ms', 'loss_pct', 'bw_mbps', 'max_queue_pkt', 'type', 'status']
-                for c in cols:
-                    if c not in df_links.columns: df_links[c] = None
-                df_links[cols].to_csv(os.path.join(output_link_dir, link_filename), index=False)
-            
-            rule_data = {"meta": {"version": "v1.2", "chunk_id": current_chunk_idx}, "rules": chunk_rules}
-            with open(os.path.join(output_rule_dir, rule_filename), 'w') as f:
-                json.dump(rule_data, f, indent=2, cls=NumpyEncoder)
-            
-            print(f"   >>> [Saved Chunk {current_chunk_idx}] {link_filename}")
+            if not ('--no-save' in sys.argv):
+                if chunk_links:
+                    df_links = pd.DataFrame(chunk_links)
+                    cols = ['time_ms', 'src', 'dst', 'direction', 'distance_km', 'delay_ms', 
+                            'jitter_ms', 'loss_pct', 'bw_mbps', 'max_queue_pkt', 'type', 'status']
+                    for c in cols:
+                        if c not in df_links.columns: df_links[c] = None
+                    df_links[cols].to_csv(os.path.join(output_link_dir, link_filename), index=False)
+                
+                rule_data = {"meta": {"version": "v1.2", "chunk_id": current_chunk_idx}, "rules": chunk_rules}
+                with open(os.path.join(output_rule_dir, rule_filename), 'w') as f:
+                    json.dump(rule_data, f, indent=2, cls=NumpyEncoder)
+                
+                print(f"   >>> [Saved Chunk {current_chunk_idx}] {link_filename}")
+            else:
+                print(f"   >>> [Skipped Saving Chunk {current_chunk_idx}] (Benchmark Mode)")
             
             chunk_links = []
             chunk_rules = []
