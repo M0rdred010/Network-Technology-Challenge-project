@@ -16,6 +16,17 @@ MIN_ELEVATION_DEG = 10.0
 SPEED_OF_LIGHT = 3e8
 TOPO_HASH_INTERVAL = 100  # 每 100 步检查一次拓扑变化
 
+# --- 实验二：动态拓扑扰动配置 (Chaos Configuration) ---
+CHAOS_CONFIG = {
+    "ENABLE": False,                    # 关闭人工扰动，仅依赖卫星原生公转造成的距离越界断连
+    "UAV_BATTERY_LIFETIMES": {          
+        "UAV_02": 250_000,              
+        "UAV_03": 400_000               
+    },
+    "RANDOM_LINK_DROP_PROB": 0.25,      
+    "RANDOM_DROP_DURATION_MS": 10000    
+}
+
 FLOWS = {
     "CTRL_FLOW": {
         "src": "GS_01",
@@ -67,10 +78,11 @@ class TopologyCache:
         """计算拓扑哈希以检测变化"""
         if not links:
             return None
-        # 仅基于链路存在情况，不考虑延迟这样的变化参数
+        # 仅基于处于 UP 状态的链路检测路由拓扑的变化 (将 DOWN 视为物理断开)
         link_str = '|'.join(
             f"{l['src']}-{l['dst']}" 
             for l in sorted(links, key=lambda x: (x['src'], x['dst']))
+            if l.get('status', 'UP') == 'UP'
         )
         return hashlib.md5(link_str.encode()).hexdigest()
     
@@ -115,6 +127,10 @@ def load_and_merge_traces(sat_dir='sat_trace', uav_file='uav_trace_full.csv'):
 
 def get_nodes_at_timestamp(df_sat, df_uav, target_time_ms):
     uav_current = df_uav[df_uav['time_ms'] == target_time_ms]
+    
+    # 之前是把断电无人机"隐身"剔除，现在为了在 CSV 中看到明确的 DOWN，我们不再在这里剔除它
+    # 而是在 compute_topology 里将它所有的连接强制标为 'DOWN'
+
     sat_time_key = (target_time_ms // 1000) * 1000
     sat_current = df_sat[df_sat['time_ms'] == sat_time_key]
     
@@ -205,6 +221,29 @@ def compute_topology(nodes_df, time_ms, FORCE_DOWN_SRC='GS_01', FORCE_DOWN_DST='
                 continue
             
             status = 'UP'
+            
+            # [实验扰动 1] 明确的 UAV 电池耗尽断链 (显式打印 DOWN 以供观察)
+            if CHAOS_CONFIG["ENABLE"]:
+                dead_uavs = [
+                    u_id for u_id, dead_time in CHAOS_CONFIG.get("UAV_BATTERY_LIFETIMES", {}).items() 
+                    if time_ms >= dead_time
+                ]
+                if n1_id in dead_uavs or n2_id in dead_uavs:
+                    status = 'DOWN'
+                    delay = 99999.0
+
+            # [实验扰动 2] 注入链路随机中断
+            if CHAOS_CONFIG["ENABLE"] and status != 'DOWN':
+                # 我们换用模运算构建伪随机，避免不同机器上 random 库全局种子同步或状态失效的问题
+                stable_pair_hash = int(hashlib.md5(f"{n1_id}-{n2_id}".encode()).hexdigest(), 16)
+                time_block = int(time_ms // CHAOS_CONFIG["RANDOM_DROP_DURATION_MS"])
+                
+                # 生成介于 0 到 1000 之间的哈希值来做概率判定
+                pseudo_rand = (stable_pair_hash ^ (time_block * 997)) % 1000
+                if pseudo_rand < (CHAOS_CONFIG["RANDOM_LINK_DROP_PROB"] * 1000):
+                    status = 'DOWN'
+                    delay = 99999.0
+
             if time_ms >= DOWN_TIME_MS:
                 if (n1_id == FORCE_DOWN_SRC and n2_id == FORCE_DOWN_DST) or \
                    (n1_id == FORCE_DOWN_DST and n2_id == FORCE_DOWN_SRC):
@@ -288,71 +327,75 @@ def generate_routing_rules(active_links, time_ms, node_ip_map, active_nodes, cac
     ctrl_flow = FLOWS["CTRL_FLOW"]
     if ctrl_flow['src'] in active_nodes:
         target_uavs = [n for n in active_nodes if n.startswith('UAV_')]
-        for target_uav in target_uavs:
+        if target_uavs:
+            target_uav = target_uavs[0]
             try:
                 path = nx.shortest_path(G_ctrl, ctrl_flow['src'], target_uav, weight='weight')
                 if len(path) > 1:
-                    target_ip = node_ip_map.get(target_uav, "0.0.0.0")
-                    for i in range(len(path) - 1):
-                        current_node = path[i]
-                        nh_id = path[i+1]
-                        rules.append({
-                            "time_ms": int(time_ms),
-                            "node": current_node,
-                            "dst_cidr": f"{target_ip}/32",
-                            "action": "replace",
-                            "next_hop": nh_id,
-                            "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
-                            "algo": "Stability-First",
-                            "req_bw_mbps": get_current_bandwidth(ctrl_flow, time_ms),
-                            "debug_info": f"Ctrl command to {target_uav}"
-                        })
-            except:
+                    nh_id = path[1]
+                    rules.append({
+                        "time_ms": int(time_ms),
+                        "node": ctrl_flow['src'],
+                        "dst_cidr": ctrl_flow['dst_cidr'],
+                        "action": "replace",
+                        "next_hop": nh_id,
+                        "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
+                        "algo": "Stability-First",
+                        "req_bw_mbps": get_current_bandwidth(ctrl_flow, time_ms),
+                        "debug_info": f"Ctrl command to UAVs"
+                    })
+            except: 
                 pass
 
     # 视频流
     target_gs = 'GS_01'
-    if target_gs not in active_nodes:
+    if target_gs not in active_nodes: 
         return rules
 
     for flow_name, flow_config in FLOWS.items():
         if flow_name.startswith("VIDEO_FLOW_"):
             src_uav = flow_config['src']
-            if src_uav not in active_nodes:
+            if src_uav not in active_nodes: 
                 continue
             
             try:
                 path = nx.shortest_path(G_video, src_uav, target_gs, weight='weight')
                 if len(path) > 1:
+                    nh_id = path[1]
                     current_bw = get_current_bandwidth(flow_config, time_ms)
-                    target_ip = node_ip_map.get(target_gs, "0.0.0.0")
-                    for i in range(len(path) - 1):
-                        current_node = path[i]
-                        nh_id = path[i+1]
-                        rules.append({
-                            "time_ms": int(time_ms),
-                            "node": current_node,
-                            "dst_cidr": f"{target_ip}/32",
-                            "action": "replace",
-                            "next_hop": nh_id,
-                            "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
-                            "algo": "Latency-Balanced",
-                            "req_bw_mbps": current_bw,
-                            "debug_info": f"[{current_bw} Mbps] Video streaming to {target_gs}"
-                        })
-            except:
+                    
+                    rules.append({
+                        "time_ms": int(time_ms),
+                        "node": src_uav,
+                        "dst_cidr": flow_config['dst_cidr'], 
+                        "action": "replace",
+                        "next_hop": nh_id,
+                        "next_hop_ip": node_ip_map.get(nh_id, "0.0.0.0"),
+                        "algo": "Latency-Balanced",
+                        "req_bw_mbps": current_bw,
+                        "debug_info": f"[{current_bw} Mbps] Video streaming to {target_gs}"
+                    })
+            except: 
                 pass
 
     return rules
 
 def main():
-    output_link_dir = 'output/links'
-    output_rule_dir = 'output/rules'
+    import sys
+    sat_dir = sys.argv[1] if len(sys.argv) > 1 else 'sat_trace'
+
+    output_link_dir = f'output_{sat_dir}_opt/links'
+    output_rule_dir = f'output_{sat_dir}_opt/rules'
     os.makedirs(output_link_dir, exist_ok=True)
     os.makedirs(output_rule_dir, exist_ok=True)
 
-    df_sat, df_uav, timelines = load_and_merge_traces(uav_file='uav_trace_full.csv')
+    df_sat, df_uav, timelines = load_and_merge_traces(sat_dir=sat_dir, uav_file='uav_trace_full.csv')
     
+    if df_sat.empty:
+        print(f"\n[Error] 未在目录 '{sat_dir}' 中找到卫星数据！")
+        print("请提供正确的卫星数据目录，例如: python s3_optimized.py sat_trace_50")
+        return
+
     if not timelines:
         print("[Error] No timelines found. Exiting.")
         return
@@ -391,6 +434,22 @@ def main():
         if i - last_topology_computation >= TOPO_HASH_INTERVAL or i == 0:
             links = compute_topology(current_nodes_df, t_val, TARGET_DOWN_SRC, TARGET_DOWN_DST, DOWN_TIME_MS)
             
+            # 【重要】原生断连显式记录：由于距离/仰角越界而断开的卫星，将被从新拓扑中剔除。
+            # 为了在 CSV 中清晰记录“发生断连”，我们通过比对上一个拓扑，手动补上原本存在但现在消失的记录，打上 DOWN 标签
+            if topo_cache.last_topology:
+                current_link_keys = { (l['src'], l['dst']) if l['src'] < l['dst'] else (l['dst'], l['src']) for l in links }
+                for old_l in topo_cache.last_topology:
+                    if old_l['status'] == 'UP': # 之前是连着的
+                        old_key = (old_l['src'], old_l['dst']) if old_l['src'] < old_l['dst'] else (old_l['dst'], old_l['src'])
+                        if old_key not in current_link_keys:
+                            # 哎呀！它因为物理距离离开了（断连了），补生成一个明确的 DOWN 的记录
+                            broken_link = old_l.copy()
+                            broken_link['status'] = 'DOWN'
+                            broken_link['delay_ms'] = 99999.0
+                            broken_link['time_ms'] = t_val
+                            links.append(broken_link)
+                            print(f"   [Native Disonnect] {old_l['src']} <--> {old_l['dst']} (Out of Range)")
+
             # 检测拓扑是否变化
             if topo_cache.is_topology_changed(links):
                 # 拓扑变化，重新构建图
@@ -401,15 +460,17 @@ def main():
                 )
                 topo_cache.cache_topology(links, cached_graphs)
                 print(f"   [Topology Updated] Step {i} (Time {t_val}ms)")
-            else:
-                # 即使拓扑没变，也需要更新缓存的 links 以同步最新的距离和延迟
-                topo_cache.last_topology = links
             
             last_topology_computation = i
         else:
-            # 重用缓存的拓扑，仅更新时间戳（生成新字典以防止修改原缓存和之前的结果）
-            links = [dict(l, time_ms=t_val) for l in topo_cache.last_topology] if topo_cache.last_topology else []
-        
+            # 重用缓存的拓扑，必须深拷贝或创建新字典以避免覆盖历史记录中的 time_ms
+            links = []
+            if topo_cache.last_topology:
+                for l in topo_cache.last_topology:
+                    new_l = l.copy()
+                    new_l['time_ms'] = t_val
+                    links.append(new_l)
+            
         chunk_links.extend(links)
         
         active_links = [l for l in links if l['status'] == 'UP']
@@ -429,19 +490,22 @@ def main():
             link_filename = f"topology_links_{start_ms}_{end_ms}.csv"
             rule_filename = f"routing_rules_{start_ms}_{end_ms}.json"
             
-            if chunk_links:
-                df_links = pd.DataFrame(chunk_links)
-                cols = ['time_ms', 'src', 'dst', 'direction', 'distance_km', 'delay_ms', 
-                        'jitter_ms', 'loss_pct', 'bw_mbps', 'max_queue_pkt', 'type', 'status']
-                for c in cols:
-                    if c not in df_links.columns: df_links[c] = None
-                df_links[cols].to_csv(os.path.join(output_link_dir, link_filename), index=False)
-            
-            rule_data = {"meta": {"version": "v1.2", "chunk_id": current_chunk_idx}, "rules": chunk_rules}
-            with open(os.path.join(output_rule_dir, rule_filename), 'w') as f:
-                json.dump(rule_data, f, indent=2, cls=NumpyEncoder)
-            
-            print(f"   >>> [Saved Chunk {current_chunk_idx}] {link_filename}")
+            if not ('--no-save' in sys.argv):
+                if chunk_links:
+                    df_links = pd.DataFrame(chunk_links)
+                    cols = ['time_ms', 'src', 'dst', 'direction', 'distance_km', 'delay_ms', 
+                            'jitter_ms', 'loss_pct', 'bw_mbps', 'max_queue_pkt', 'type', 'status']
+                    for c in cols:
+                        if c not in df_links.columns: df_links[c] = None
+                    df_links[cols].to_csv(os.path.join(output_link_dir, link_filename), index=False)
+                
+                rule_data = {"meta": {"version": "v1.2", "chunk_id": current_chunk_idx}, "rules": chunk_rules}
+                with open(os.path.join(output_rule_dir, rule_filename), 'w') as f:
+                    json.dump(rule_data, f, indent=2, cls=NumpyEncoder)
+                
+                print(f"   >>> [Saved Chunk {current_chunk_idx}] {link_filename}")
+            else:
+                print(f"   >>> [Skipped Saving Chunk {current_chunk_idx}] (Benchmark Mode)")
             
             chunk_links = []
             chunk_rules = []
