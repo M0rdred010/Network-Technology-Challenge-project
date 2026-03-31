@@ -139,18 +139,23 @@ def run():
     reqs = sar_requests + uav_requests
     reqs.sort(key=lambda x: x['time'])
 
-    # 只处理第一个CSV文件，因为它包含了完整的网络拓扑
     csv_files = GetAllFiles(csv_dir)
     rules_files = GetAllFiles(rules_dir)
-    
-    csv_file = pd.concat(csv_files)
-    rules_file = pd.concat(rules_files)
 
-        
+    csv_list = list()
+    meta = list()
+    rules = list()
+    for csv_file , rules_file in zip( csv_files , rules_files ):
+        csv_list.append(pd.read_csv(csv_file))
+        meta , rule_ = ReadRules(rules_file)
+        rules.extend(rule_)
+
+    links = pd.concat(csv_list)
+
+
     if csv_files and rules_files:
-        LogColor.info(f"csv file: {csv_file}\nrules file: {rules_file}\n")
-        links = ReadLinks(csv_file)
-        meta, rules = ReadRules(rules_file)
+        LogColor.info(f"csv file: {csv_dir}\nrules file: {rules_dir}\n")
+        # links = ReadLinks(csv_file)
 
         timer = 0
         req_ind = 0
@@ -161,8 +166,8 @@ def run():
         try:
             while tmp_timer < 600000:
                 LogColor.info(f'time : {timer}')
-                while edge_ind < len(links) and int(links[edge_ind]['time_ms']) <= timer:
-                    engine.addLink(links[edge_ind])
+                while edge_ind < len(links) and int(links.iloc[edge_ind]['time_ms']) <= timer:
+                    engine.addLink(links.iloc[edge_ind])
                     edge_ind += 1
 
                 while rule_ind < len(rules) and rules[rule_ind]['time_ms'] <= timer:
