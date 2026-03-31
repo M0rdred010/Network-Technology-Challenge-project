@@ -6,6 +6,7 @@ import csv
 import time
 import json
 import datetime
+import pandas as pd
 
 from generate import generate_sar_traffic, generate_uav_requests, generate_uav_requests
 
@@ -142,14 +143,14 @@ def run():
     csv_files = GetAllFiles(csv_dir)
     rules_files = GetAllFiles(rules_dir)
     
-    if csv_files and rules_files:
-        csv_file = csv_files[0]
-        rules_file = rules_files[0]
+    csv_file = pd.concat(csv_files)
+    rules_file = pd.concat(rules_files)
+
         
+    if csv_files and rules_files:
         LogColor.info(f"csv file: {csv_file}\nrules file: {rules_file}\n")
         links = ReadLinks(csv_file)
         meta, rules = ReadRules(rules_file)
-        engine.AddContent('UAV_03', 'test.jpg', filesize=50)
 
         timer = 0
         req_ind = 0
@@ -175,7 +176,7 @@ def run():
                 
                 timer += 100
                 tmp_timer += 100
-                time.sleep(0.1)
+                time.sleep(0.05)
         except KeyboardInterrupt:
             return
 
