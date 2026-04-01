@@ -283,20 +283,22 @@ def generate_routing_rules(active_links, time_ms, active_nodes, node_ip_map):
         if len(path) < 2:
             continue
 
-        next_hop = path[1]
-        rules.append(
-            {
-                "time_ms": int(time_ms),
-                "node": src,
-                "dst_cidr": f"{node_ip_map.get(dst, '0.0.0.0')}/32",
-                "action": "replace",
-                "next_hop": next_hop,
-                "next_hop_ip": node_ip_map.get(next_hop, "0.0.0.0"),
-                "algo": "Optimized",
-                "req_bw_mbps": get_current_bandwidth(flow_name, flow_cfg, time_ms),
-                "debug_info": f"{src}->{dst}",
-            }
-        )
+        for i in range(len(path) - 1):
+            current_node = path[i]
+            next_hop = path[i + 1]
+            rules.append(
+                {
+                    "time_ms": int(time_ms),
+                    "node": current_node,
+                    "dst_cidr": f"{node_ip_map.get(dst, '0.0.0.0')}/32",
+                    "action": "replace",
+                    "next_hop": next_hop,
+                    "next_hop_ip": node_ip_map.get(next_hop, "0.0.0.0"),
+                    "algo": "Optimized",
+                    "req_bw_mbps": get_current_bandwidth(flow_name, flow_cfg, time_ms),
+                    "debug_info": f"{src}->{dst}",
+                }
+            )
 
     return rules
 
