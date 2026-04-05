@@ -101,7 +101,7 @@ def run():
 
     engine.Get_ip(cf.uav_csv)
 
-    uav_list = ['UAV_01', 'UAV_02', 'UAV_03']
+    uav_list = ['UAV_01', 'UAV_02', 'UAV_03', 'UAV_04', 'UAV_05', 'UAV_06', 'UAV_07', 'UAV_08', 'UAV_09', 'UAV_10']
     main_gs = 'GS_01'
 
     # 为所有类型的内容添加到系统中

@@ -63,12 +63,14 @@ def generate_uav_requests(uav_list, max_time_ms=600000):
         if current_time % 1500 == 0:
             for i, uav in enumerate(uav_list):
                 # 随机选择一个其他无人机作为目标
-                target_uav = random.choice([u for u in uav_list if u != uav])
-                requests.append({
-                    'time': current_time + random.randint(0, 50),
-                    'node_id': uav,       # 请求方是无人机
-                    'content_id': f'status_update_{uav}'
-                })
+                other_uavs = [v for v in uav_list if v != uav]
+                if other_uavs:  # 确保有其他无人机
+                    target_uav = random.choice(other_uavs)
+                    requests.append({
+                        'time': current_time + random.randint(0, 50),
+                        'node_id': uav,       # 请求方是无人机
+                        'content_id': f'status_update_{target_uav}'  # 请求其他无人机的状态
+                    })
         
         # 目标位置信息共享（每3000ms）
         if current_time % 3000 == 0 and current_time >= 20000:  # 20秒后开始
@@ -84,12 +86,14 @@ def generate_uav_requests(uav_list, max_time_ms=600000):
             # 随机选择一个无人机作为任务发起方
             task_initiator = random.choice(uav_list)
             # 随机选择一个无人机作为协作对象
-            task_partner = random.choice([u for u in uav_list if u != task_initiator])
-            requests.append({
-                'time': current_time,
-                'node_id': task_initiator,       # 请求方是无人机
-                'content_id': f'collaboration_request_{task_partner}'
-            })
+            other_uavs = [u for u in uav_list if u != task_initiator]
+            if other_uavs:  # 确保有其他无人机
+                task_partner = random.choice(other_uavs)
+                requests.append({
+                    'time': current_time,
+                    'node_id': task_initiator,       # 请求方是无人机
+                    'content_id': f'collaboration_request_{task_partner}'
+                })
         
         # 紧急情况求助（随机发生）
         if random.random() < 0.005:  # 5%的概率触发紧急求助
@@ -104,11 +108,15 @@ def generate_uav_requests(uav_list, max_time_ms=600000):
         # 燃油状态共享（每5000ms）
         if current_time % 5000 == 0:
             for uav in uav_list:
-                requests.append({
-                    'time': current_time + random.randint(0, 50),
-                    'node_id': uav,       # 请求方是无人机
-                    'content_id': f'fuel_status_{uav}'
-                })
+                # 随机选择一个其他无人机作为目标
+                other_uavs = [v for v in uav_list if v != uav]
+                if other_uavs:  # 确保有其他无人机
+                    target_uav = random.choice(other_uavs)
+                    requests.append({
+                        'time': current_time + random.randint(0, 50),
+                        'node_id': uav,       # 请求方是无人机
+                        'content_id': f'fuel_status_{target_uav}'  # 请求其他无人机的燃油状态
+                    })
     
     # 按 'time' 排序，适配主循环判断
     requests.sort(key=lambda x: x['time'])
