@@ -1,1 +1,8 @@
+# dirs
 node_modules/
+vis/*.csv
+__pycache__/
+logs/
+uv.lock
+.python-version
+src/S4/out_put/
